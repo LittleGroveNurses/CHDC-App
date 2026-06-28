@@ -2148,30 +2148,66 @@ const ASQ_DATA = {
 };
 
 // AGE-INTERVAL MAPPING
+// ASQ-3 interval matching uses a calendar-accurate approach rather than fixed day counts.
+// The calcAge() function computes real calendar days between DOB and assessment date.
+// 30-day-month approximations diverge by up to 28 days for older children (the root
+// cause of the 44m interval bug reported June 2026). The correct approach is to compute
+// the interval boundaries dynamically from the child's actual DOB.
+//
+// INTERVALS now stores the official ASQ-3 month/day boundaries as published by Brookes.
+// Matching is done in getIntervalForDOB() using real calendar arithmetic.
 const INTERVALS = [
-  // Official ASQ-3 age bands (converted to days, 1 month ≈ 30.4375 days)
-  { months: 2,  min: 30,   max: 90   },  // 1mo 0d   – 2mo 30d
-  { months: 4,  min: 90,   max: 150  },  // 3mo 0d   – 4mo 30d
-  { months: 6,  min: 150,  max: 210  },  // 5mo 0d   – 6mo 30d
-  { months: 8,  min: 210,  max: 270  },  // 7mo 0d   – 8mo 30d
-  { months: 9,  min: 270,  max: 300  },  // 9mo 0d   – 9mo 30d
-  { months: 10, min: 270,  max: 330  },  // 9mo 0d   – 10mo 30d
-  { months: 12, min: 330,  max: 390  },  // 11mo 0d  – 12mo 30d
-  { months: 14, min: 390,  max: 450  },  // 13mo 0d  – 14mo 30d
-  { months: 16, min: 450,  max: 510  },  // 15mo 0d  – 16mo 30d
-  { months: 18, min: 510,  max: 570  },  // 17mo 0d  – 18mo 30d
-  { months: 20, min: 570,  max: 630  },  // 19mo 0d  – 20mo 30d
-  { months: 22, min: 630,  max: 690  },  // 21mo 0d  – 22mo 30d
-  { months: 24, min: 690,  max: 765  },  // 23mo 0d  – 25mo 15d
-  { months: 27, min: 766,  max: 855  },  // 25mo 16d – 28mo 15d
-  { months: 30, min: 856,  max: 945  },  // 28mo 16d – 31mo 15d
-  { months: 33, min: 946,  max: 1035 },  // 31mo 16d – 34mo 15d
-  { months: 36, min: 1036, max: 1170 },  // 34mo 16d – 38mo 30d  ✓ FIXED
-  { months: 42, min: 1170, max: 1350 },  // 39mo 0d  – 44mo 30d  ✓ FIXED
-  { months: 48, min: 1350, max: 1530 },  // 45mo 0d  – 50mo 30d
-  { months: 54, min: 1530, max: 1710 },  // 51mo 0d  – 56mo 30d
-  { months: 60, min: 1710, max: 1980 },  // 57mo 0d  – 66mo 0d
+  // { months, minM, minD, maxM, maxD }  — official ASQ-3 Brookes administration windows
+  { months: 2,  minM: 1,  minD: 0,  maxM: 2,  maxD: 30 },
+  { months: 4,  minM: 3,  minD: 0,  maxM: 4,  maxD: 30 },
+  { months: 6,  minM: 5,  minD: 0,  maxM: 6,  maxD: 30 },
+  { months: 8,  minM: 7,  minD: 0,  maxM: 8,  maxD: 30 },
+  { months: 9,  minM: 9,  minD: 0,  maxM: 9,  maxD: 30 },
+  { months: 10, minM: 9,  minD: 0,  maxM: 10, maxD: 30 },
+  { months: 12, minM: 11, minD: 0,  maxM: 12, maxD: 30 },
+  { months: 14, minM: 13, minD: 0,  maxM: 14, maxD: 30 },
+  { months: 16, minM: 15, minD: 0,  maxM: 16, maxD: 30 },
+  { months: 18, minM: 17, minD: 0,  maxM: 18, maxD: 30 },
+  { months: 20, minM: 19, minD: 0,  maxM: 20, maxD: 30 },
+  { months: 22, minM: 21, minD: 0,  maxM: 22, maxD: 30 },
+  { months: 24, minM: 23, minD: 0,  maxM: 25, maxD: 15 },
+  { months: 27, minM: 25, minD: 16, maxM: 28, maxD: 15 },
+  { months: 30, minM: 28, minD: 16, maxM: 31, maxD: 15 },
+  { months: 33, minM: 31, minD: 16, maxM: 34, maxD: 15 },
+  { months: 36, minM: 34, minD: 16, maxM: 38, maxD: 30 },
+  { months: 42, minM: 39, minD: 0,  maxM: 44, maxD: 30 },
+  { months: 48, minM: 45, minD: 0,  maxM: 50, maxD: 30 },
+  { months: 54, minM: 51, minD: 0,  maxM: 56, maxD: 30 },
+  { months: 60, minM: 57, minD: 0,  maxM: 66, maxD: 0  },
 ];
+
+// Add months+days to a Date using calendar arithmetic
+function _addMonthsDays(dob, months, days) {
+  const y = dob.getFullYear();
+  const m = dob.getMonth(); // 0-based
+  const d = dob.getDate();
+  let ty = y + Math.floor((m + months) / 12);
+  let tm = (m + months) % 12;
+  // Clamp to end of month
+  const maxDay = new Date(ty, tm + 1, 0).getDate();
+  let td = Math.min(d, maxDay);
+  const result = new Date(ty, tm, td);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+// Find the correct ASQ-3 interval for a given DOB and assessment date
+// Returns the matched interval object or null
+function getIntervalForDOB(dobDate, assessDate) {
+  for (const iv of INTERVALS) {
+    const windowStart = _addMonthsDays(dobDate, iv.minM, iv.minD);
+    const windowEnd   = _addMonthsDays(dobDate, iv.maxM, iv.maxD);
+    if (assessDate >= windowStart && assessDate <= windowEnd) {
+      return iv;
+    }
+  }
+  return null;
+}
 
 // STATE
 let state = {
@@ -2253,7 +2289,7 @@ function calcAge() {
   const monthsBirthday = new Date(d1.getFullYear(), d1.getMonth() + totalMonths, d1.getDate());
   const remainderDays = Math.floor((d2 - monthsBirthday) / 86400000);
 
-  // Total days (used for interval matching)
+  // Total days (for display only — interval matching now uses calendar arithmetic)
   const diffDays = Math.floor((d2 - d1) / 86400000);
 
   const yy = Math.floor(totalMonths / 12);
@@ -2263,11 +2299,8 @@ function calcAge() {
   document.getElementById('ageMonths').textContent =
     `${totalMonths} months, ${remainderDays} days (${diffDays} days total)`;
 
-  // Find interval
-  let matched = null;
-  for (const iv of INTERVALS) {
-    if (diffDays >= iv.min && diffDays <= iv.max) { matched = iv; break; }
-  }
+  // Find interval using calendar-accurate DOB-based arithmetic (fixes 30-day month drift)
+  let matched = getIntervalForDOB(d1, d2);
 
   note.style.display = 'block';
   if (matched) {
@@ -2275,19 +2308,25 @@ function calcAge() {
     intDisplay.innerHTML = `<span class="interval-badge">${d.label} Questionnaire</span>`;
     note.className = 'alert alert-info';
     note.textContent = `Age range for this questionnaire: ${d.ageRange}`;
-  } else if (diffDays < 30) {
+  } else if (totalMonths < 1) {
     intDisplay.textContent = 'Child too young (< 1 month)';
     note.className = 'alert alert-warn';
     note.textContent = 'ASQ-3 is not appropriate for children under 1 month of age.';
-  } else if (diffDays > 2010) {
+  } else if (totalMonths > 66) {
     intDisplay.textContent = 'Child too old (> 66 months)';
     note.className = 'alert alert-warn';
     note.textContent = 'ASQ-3 is not appropriate for children over 66 months.';
   } else {
-    // Find nearest interval and suggest it
-    let nearest = INTERVALS.reduce((prev, curr) =>
-      Math.abs(curr.min - diffDays) < Math.abs(prev.min - diffDays) ? curr : prev
-    );
+    // Between intervals — find nearest by comparing diffDays to midpoint of each window
+    let nearest = null;
+    let nearestDist = Infinity;
+    for (const iv of INTERVALS) {
+      const winStart = _addMonthsDays(d1, iv.minM, iv.minD);
+      const winEnd   = _addMonthsDays(d1, iv.maxM, iv.maxD);
+      const midMs = (winStart.getTime() + winEnd.getTime()) / 2;
+      const dist = Math.abs(d2.getTime() - midMs);
+      if (dist < nearestDist) { nearestDist = dist; nearest = iv; }
+    }
     intDisplay.innerHTML = `<span class="interval-badge" style="background:#e65100">${ASQ_DATA[nearest.months].label} (nearest)</span>`;
     note.className = 'alert alert-warn';
     note.textContent = `Age ${totalMonths}mo ${remainderDays}d falls between questionnaire intervals. Nearest interval suggested — confirm with clinical judgement.`;
