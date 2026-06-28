@@ -219,6 +219,11 @@
   .score-btn.selected-yes { background: #e6f5ef; border-color: var(--green); color: #2e7d52; }
   .score-btn.selected-sometimes { background: var(--pale); border-color: var(--mauve); color: #a0558a; }
   .score-btn.selected-not { background: #eef0f8; border-color: var(--navy); color: var(--navy); }
+  .score-btn-noopp { border-color: #9e9e9e; color: #757575; font-size: 0.78rem; }
+  .score-btn-noopp:hover { border-color: #e65100; color: #e65100; }
+  .score-btn-noopp.selected-noopp { background: #fff3e0; border-color: #e65100; color: #e65100; font-weight: 600; }
+  .q-num { font-weight: 700; color: #888; min-width: 1.6rem; display: inline-block; font-size: 0.82rem; }
+  .prorated-note { font-size: 0.75rem; color: #e65100; margin-left: 8px; font-style: italic; }
 
   /* DOMAIN SCORE BAND */
   .domain-footer {
@@ -2357,6 +2362,7 @@ function startAssessment() {
   state.room = document.getElementById('room').value.trim();
   state.checkFormat = 'In-Person';
   state.scores = {};
+  state.noOpp = {};
   state.overallAnswers = {};
   state.overallComments = {};
   state.clinicianNotes = '';
@@ -2398,6 +2404,7 @@ function renderScoring() {
           <button class="score-btn" data-domain="${d.key}" data-idx="${i}" data-val="10" onclick="setScore(this)">Always (10)</button>
           <button class="score-btn" data-domain="${d.key}" data-idx="${i}" data-val="5" onclick="setScore(this)">Sometimes (5)</button>
           <button class="score-btn" data-domain="${d.key}" data-idx="${i}" data-val="0" onclick="setNot(this)">Not Yet (0)</button>
+          <button class="score-btn score-btn-noopp" data-domain="${d.key}" data-idx="${i}" onclick="setNoOpp(this)" title="Child has not had the opportunity to try this — item excluded from scoring and score pro-rated">No opportunity ↻</button>
         </div>
       </div>`;
     });
@@ -2446,6 +2453,44 @@ function setScore(btn) {
 
 function setNot(btn) { setScore(btn); }
 
+function setNoOpp(btn) {
+  const domain = btn.dataset.domain, idx = parseInt(btn.dataset.idx);
+  if (!state.noOpp[domain]) state.noOpp[domain] = {};
+  const wasSet = state.noOpp[domain][idx];
+  // Toggle: clicking again removes the exclusion
+  if (wasSet) {
+    delete state.noOpp[domain][idx];
+    btn.classList.remove('selected-noopp');
+  } else {
+    state.noOpp[domain][idx] = true;
+    // Clear any existing score for this item
+    if (state.scores[domain]) delete state.scores[domain][idx];
+    // Deselect other score buttons for this item
+    document.querySelectorAll(`.score-btn[data-domain="${domain}"][data-idx="${idx}"]`).forEach(b => {
+      b.classList.remove('selected-yes','selected-sometimes','selected-not');
+    });
+    btn.classList.add('selected-noopp');
+  }
+  // Warn if too many omitted
+  const omitted = getDomainOmitted(domain);
+  const warningId = `noopp-warn-${domain}`;
+  let warn = document.getElementById(warningId);
+  if (omitted >= 3) {
+    if (!warn) {
+      warn = document.createElement('div');
+      warn.id = warningId;
+      warn.className = 'alert alert-warn';
+      warn.style.marginTop = '4px';
+      btn.closest('.domain-section').appendChild(warn);
+    }
+    warn.textContent = `⚠️ ${omitted} items marked 'No opportunity' — domain score is not valid per ASQ-3 manual (max 2 omissions allowed for pro-rating).`;
+  } else if (warn) {
+    warn.remove();
+  }
+  updateProgress();
+  updateDomainScore(domain);
+}
+
 function setOverall(btn) {
   const oi = btn.dataset.oi, v = btn.dataset.v;
   state.overallAnswers[oi] = v;
@@ -2454,10 +2499,26 @@ function setOverall(btn) {
 }
 
 function updateDomainScore(domain) {
-  const scores = state.scores[domain] || {};
-  const total = Object.values(scores).reduce((a,b) => a+b, 0);
+  const score = getDomainScore(domain);
+  const omitted = getDomainOmitted(domain);
   const el = document.getElementById('score_' + domain);
-  if (el) el.textContent = total;
+  if (el) {
+    el.textContent = score;
+    // Show pro-rating notice in the header
+    const noteId = 'prorated_' + domain;
+    let note = document.getElementById(noteId);
+    if (omitted > 0 && omitted <= 2) {
+      if (!note) {
+        note = document.createElement('span');
+        note.id = noteId;
+        note.className = 'prorated-note';
+        el.parentNode.appendChild(note);
+      }
+      note.textContent = `(pro-rated, ${omitted} item${omitted>1?'s':''} excluded)`;
+    } else if (note) {
+      note.remove();
+    }
+  }
 }
 
 function updateProgress() {
@@ -2466,6 +2527,7 @@ function updateProgress() {
   let answered = 0;
   ['comm','gross','fine','prob','personal'].forEach(d => {
     answered += Object.keys(state.scores[d]||{}).length;
+    answered += Object.keys(state.noOpp[d]||{}).filter(k => state.noOpp[d][k]).length;
   });
   const pct = Math.round(answered/total*100);
   const el = document.getElementById('progBar');
@@ -2477,6 +2539,7 @@ function updateProgress() {
 function clearAll() {
   if (confirm('Clear all scores for this assessment?')) {
     state.scores = {};
+    state.noOpp = {};
     renderScoring();
   }
 }
@@ -2486,7 +2549,26 @@ function clearAll() {
 // ─────────────────────────────────────────────
 function getDomainScore(domain) {
   const scores = state.scores[domain] || {};
-  return Object.values(scores).reduce((a,b) => a+b, 0);
+  const noOpp  = state.noOpp[domain]  || {};
+  const ITEMS  = 6;
+  let rawSum = 0, scored = 0;
+  for (let i = 0; i < ITEMS; i++) {
+    if (noOpp[i]) continue;          // excluded from scoring
+    rawSum += (scores[i] || 0);
+    scored++;
+  }
+  if (scored === 0) return 0;
+  // Pro-rate if any items excluded (ASQ-3 manual: valid if ≤2 items omitted per domain)
+  const prorated = scored < ITEMS ? Math.round((rawSum / (scored * 10)) * 60) : rawSum;
+  return prorated;
+}
+
+function getDomainOmitted(domain) {
+  return Object.values(state.noOpp[domain] || {}).filter(Boolean).length;
+}
+
+function isDomainValid(domain) {
+  return getDomainOmitted(domain) <= 2;
 }
 
 function getStatus(score, cutoffObj) {
@@ -2499,7 +2581,7 @@ function getStatus(score, cutoffObj) {
 
 function getStatusLabel(status) {
   if (status === 'above') return '✅ Above monitoring zone – Development on schedule';
-  if (status === 'near') return '⚠️ Monitoring zone – Score near cutoff, monitor closely';
+  if (status === 'near') return '⚠️ Monitoring zone – Score above cutoff but within 1 SD (monitor zone). Provide learning activities and rescreen in 1–2 months';
   return '🔴 Below cutoff – Further assessment recommended';
 }
 
@@ -2522,17 +2604,22 @@ function generateResults() {
 
   domains.forEach(d => {
     const score = getDomainScore(d.key);
+    const omitted = getDomainOmitted(d.key);
+    const valid = isDomainValid(d.key);
     const cutoffObj = q.cutoffs[d.key];
     const status = getStatus(score, cutoffObj);
     const pct = Math.min(100, Math.round(score / 60 * 100));
     const monVal = typeof cutoffObj === 'object' ? cutoffObj.monitor : '—';
     const refVal = typeof cutoffObj === 'object' ? cutoffObj.cutoff : cutoffObj;
-    html += `<div class="domain-result-card ${status}">
+    const prorateNote = omitted > 0 && valid ? `<div style="font-size:0.72rem;color:#e65100;margin-top:2px;">Pro-rated (${omitted} item${omitted>1?'s':''} excluded)</div>` : '';
+    const invalidNote = !valid ? `<div style="font-size:0.72rem;color:#c62828;margin-top:2px;">⚠️ Invalid — ${omitted} items excluded (max 2 allowed)</div>` : '';
+    html += `<div class="domain-result-card ${valid ? status : 'invalid'}">
       <div class="result-domain-name">${d.label}</div>
       <div class="result-bar-wrap"><div class="result-bar" style="width:${pct}%"></div></div>
       <div class="result-scores"><span>Score: <strong>${score}</strong>/60</span></div>
       <div class="result-scores" style="margin-top:4px;font-size:0.75rem;opacity:0.85"><span>Monitor ≤${monVal}</span><span>Refer ≤${refVal}</span></div>
-      <div class="result-status">${getStatusLabel(status)}</div>
+      ${prorateNote}${invalidNote}
+      <div class="result-status">${valid ? getStatusLabel(status) : '⚠️ Score not valid — too many items excluded'}</div>
     </div>`;
   });
 
@@ -2558,13 +2645,16 @@ function generateResults() {
       <thead><tr><th>Domain</th><th>Score</th><th>Monitor Zone (1 SD)</th><th>Refer Cutoff (2 SD)</th><th>Status</th></tr></thead><tbody>`;
   domains.forEach(d => {
     const score = getDomainScore(d.key);
+    const omitted = getDomainOmitted(d.key);
+    const valid = isDomainValid(d.key);
     const cutoff = q.cutoffs[d.key];
     const status = getStatus(score, cutoff);
-    const pillClass = status === 'above' ? 'pill-above' : status === 'near' ? 'pill-near' : 'pill-below';
-    const pillLabel = status === 'above' ? '✅ On schedule' : status === 'near' ? '⚠️ Monitor closely' : '🔴 Refer';
+    const pillClass = !valid ? 'pill-below' : status === 'above' ? 'pill-above' : status === 'near' ? 'pill-near' : 'pill-below';
+    const pillLabel = !valid ? '⚠️ Invalid' : status === 'above' ? '✅ On schedule' : status === 'near' ? '⚠️ Monitor closely' : '🔴 Refer';
     const monVal = typeof cutoff === 'object' ? cutoff.monitor : '—';
     const refVal = typeof cutoff === 'object' ? cutoff.cutoff : cutoff;
-    html += `<tr><td>${d.label}</td><td><strong>${score}</strong></td><td>${monVal}</td><td>${refVal}</td><td><span class="status-pill ${pillClass}">${pillLabel}</span></td></tr>`;
+    const proNote = omitted > 0 ? `<br><small style="color:#e65100">${valid?'pro-rated':'invalid'} (${omitted} excl.)</small>` : '';
+    html += `<tr><td>${d.label}</td><td><strong>${score}</strong>${proNote}</td><td>${monVal}</td><td>${refVal}</td><td><span class="status-pill ${pillClass}">${pillLabel}</span></td></tr>`;
   });
   html += `</tbody></table></div>`;
 
